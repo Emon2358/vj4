@@ -2,7 +2,7 @@ import subprocess
 import os
 import random
 import sys
-import re # URLからファイル名を抽出するために追加
+import re
 
 def download_niconico_video(url, output_dir="videos"):
     """
@@ -18,13 +18,13 @@ def download_niconico_video(url, output_dir="videos"):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # yt-dlpの出力テンプレートを設定
-    # %(title)s は動画のタイトル、%(ext)s は拡張子
     output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
     
     print(f"ニコニコ動画をダウンロード中: {url}...")
     try:
-        # yt-dlp を実行して動画をダウンロード
+        # --print filepath: ダウンロード後にファイルの絶対パスを出力
+        # --verbose: 詳細なログを出力 (デバッグ用)
+        # --no-simulate: シミュレーションモードを無効化
         # --output: 出力ファイル名を指定
         # --format bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best: MP4形式で最高品質の動画と音声を結合、または最高のMP4形式、または最高の品質を選択
         # --merge-output-format mp4: 結合された出力の形式をmp4に設定
@@ -33,27 +33,35 @@ def download_niconico_video(url, output_dir="videos"):
             "--output", output_template,
             "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "--merge-output-format", "mp4",
+            "--print", "filepath", # ダウンロードされたファイルの絶対パスを出力
+            "--verbose", # デバッグのために詳細ログを追加
             url
         ], check=True, capture_output=True, text=True)
-        print("yt-dlp出力:\n", result.stdout)
+        
+        # yt-dlpのstdoutには、--print filepathで指定されたパスが含まれるはず
+        # 最後の行がfilepathであることが多いが、念のため正規表現で抽出
+        downloaded_file_path_match = re.search(r'^(.*?)\n?$', result.stdout.strip().split('\n')[-1])
+        downloaded_file_path = downloaded_file_path_match.group(1) if downloaded_file_path_match else ""
 
-        # yt-dlpの出力からダウンロードされたファイルパスを解析
-        # [download] Destination: ... の行を探す
-        match = re.search(r'\[download\] Destination: (.+)', result.stdout)
-        if match:
-            downloaded_file_path = match.group(1).strip()
+        # 実際にファイルが存在するか確認
+        if os.path.exists(downloaded_file_path):
             print(f"ダウンロード完了: {downloaded_file_path}")
+            print(f"DOWNLOADED_PATH:{downloaded_file_path}") # GitHub Actionsでパースするためのマーカー
             return downloaded_file_path
         else:
-            print("エラー: ダウンロードされたファイルパスをyt-dlpの出力から解析できませんでした。")
+            print(f"エラー: yt-dlpは完了しましたが、ファイルが見つかりません: {downloaded_file_path}")
             print("yt-dlpの完全な出力:\n", result.stdout)
+            print("yt-dlpのエラー出力:\n", result.stderr)
+            print("ERROR:File not found after download") # GitHub Actionsでパースするためのマーカー
             return None
 
     except subprocess.CalledProcessError as e:
         print(f"yt-dlpエラー: {e.stderr}")
+        print(f"ERROR:yt-dlp failed with exit code {e.returncode}") # GitHub Actionsでパースするためのマーカー
         return None
     except Exception as e:
         print(f"ダウンロード中に予期せぬエラーが発生しました: {e}")
+        print(f"ERROR:Unexpected error during download: {e}") # GitHub Actionsでパースするためのマーカー
         return None
 
 def datamosh_video(input_video_path, output_video_path, glitches_to_apply=5, glitch_strength=5000):
@@ -149,47 +157,67 @@ def datamosh_video(input_video_path, output_video_path, glitches_to_apply=5, gli
         print("一時ファイルを削除しました。")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
+    # コマンドライン引数の解析をより堅牢にする
+    args = sys.argv[1:]
+    
+    input_file = None
+    output_file = None
+    niconico_url = None
+    glitches = 10
+    strength = 8000
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--url":
+            niconico_url = args[i+1]
+            i += 2
+        elif args[i] == "--glitches":
+            glitches = int(args[i+1])
+            i += 2
+        elif args[i] == "--strength":
+            strength = int(args[i+1])
+            i += 2
+        else:
+            # 残りの引数をファイルパスとして扱う
+            if input_file is None:
+                input_file = args[i]
+            elif output_file is None:
+                output_file = args[i]
+            i += 1
+
+    # --url が指定されている場合は、出力ファイルが必須
+    if niconico_url and not output_file:
+        print("エラー: --url オプションを使用する場合は、出力ファイル名を指定する必要があります。")
+        sys.exit(1)
+    # --url もファイルパスも指定されていない場合
+    if not niconico_url and not input_file:
         print("使用法:")
-        print("  ファイルパスからデータモッシュ: python datamosh.py <入力ファイル名> <出力ファイル名> [グリッチ回数] [グリッチ強度]")
-        print("  ニコニコ動画URLからデータモッシュ: python datamosh.py --url <ニコニコ動画URL> <出力ファイル名> [グリッチ回数] [グリッチ強度]")
+        print("  ファイルパスからデータモッシュ: python datamosh.py <入力ファイル名> <出力ファイル名> [--glitches <回数>] [--strength <強度>]")
+        print("  ニコニコ動画URLからデータモッシュ: python datamosh.py --url <ニコニコ動画URL> <出力ファイル名> [--glitches <回数>] [--strength <強度>]")
+        sys.exit(1)
+    
+    # ローカルファイルパスが指定されている場合は、出力ファイルが必須
+    if input_file and not output_file:
+        print("エラー: ローカルファイルパスを指定する場合は、出力ファイル名を指定する必要があります。")
         sys.exit(1)
 
-    input_is_url = False
-    input_source = sys.argv[1] # ファイルパスまたは --url
-    output_file_index = 2 # 出力ファイルのsys.argvインデックス
-
-    if input_source == "--url":
-        input_is_url = True
-        if len(sys.argv) < 4:
-            print("エラー: --url オプションを使用する場合は、ニコニコ動画URLと出力ファイル名を指定する必要があります。")
-            sys.exit(1)
-        niconico_url = sys.argv[2]
-        output_file = sys.argv[3]
-        glitches_index = 4
-        strength_index = 5
-    else:
-        input_file = sys.argv[1]
-        output_file = sys.argv[2]
-        glitches_index = 3
-        strength_index = 4
-
-    glitches = int(sys.argv[glitches_index]) if len(sys.argv) > glitches_index else 10 # デフォルトは10回
-    strength = int(sys.argv[strength_index]) if len(sys.argv) > strength_index else 8000 # デフォルトは8000バイト
-
-    if input_is_url:
-        # ダウンロードディレクトリを一時的に設定
+    if niconico_url:
         download_dir = "downloaded_videos"
         downloaded_path = download_niconico_video(niconico_url, download_dir)
         if downloaded_path:
-            datamosh_video(downloaded_path, output_file, glitches_to_apply=glitches, glitch_strength=strength)
-            # ダウンロードした一時ファイルを削除
-            if os.path.exists(downloaded_path):
+            # ダウンロードが成功した場合のみデータモッシュを実行
+            # 出力ファイル名は、ダウンロードされたファイル名に基づいて生成
+            input_filename_no_ext = os.path.splitext(os.path.basename(downloaded_path))[0]
+            final_output_file = os.path.join(download_dir, f"{input_filename_no_ext}_datamoshed.mp4")
+            
+            datamosh_video(downloaded_path, final_output_file, glitches_to_apply=glitches, glitch_strength=strength)
+            
+            # ダウンロードした一時ファイルを削除 (データモッシュされたファイルと異なる場合のみ)
+            if os.path.exists(downloaded_path) and downloaded_path != final_output_file:
                 os.remove(downloaded_path)
                 print(f"一時ダウンロードファイル {downloaded_path} を削除しました。")
         else:
             print("動画のダウンロードに失敗しました。データモッシュをスキップします。")
             sys.exit(1)
-    else:
+    elif input_file:
         datamosh_video(input_file, output_file, glitches_to_apply=glitches, glitch_strength=strength)
-
