@@ -11,17 +11,18 @@ on:
         description: '処理する動画ファイルへのパス (例: videos/input.mp4)'
         required: true
         default: 'videos/input.mp4'
-      glitch_count: # 以前のパラメータに戻す
-        description: '適用するグリッチの回数'
+      glitch_count:
+        description: 'グリッチの回数'
         required: false
-        default: '15' # デフォルト値を設定
-      glitch_strength: # 以前のパラメータに戻す
-        description: '各グリッチで破損させるバイト数'
+        default: '15'
+      glitch_strength:
+        description: 'グリッチの強度 (バイト数)'
         required: false
-        default: '10000' # デフォルト値を設定
+        default: '10000'
 
-permissions:
-  contents: write
+permissions: # ワークフロー全体の権限を設定
+  contents: write # リリース作成とアセットアップロードのために必要
+  # pull-requests: write # 必要であればプルリクエストの権限も追加
 
 jobs:
   datamosh:
@@ -43,7 +44,7 @@ jobs:
 
     - name: Get changed video files (for push event)
       id: changed-videos
-      if: github.event_name == 'push'
+      if: github.event_name == 'push' # pushイベントの場合のみ実行
       uses: tj-actions/changed-files@v40
       with:
         files: |
@@ -54,12 +55,16 @@ jobs:
       id: set-inputs
       run: |
         INPUT_FILE=""
-        # workflow_dispatch からの入力、またはデフォルト値
-        GLITCH_COUNT="${{ github.event.inputs.glitch_count || '15' }}"
-        GLITCH_STRENGTH="${{ github.event.inputs.glitch_strength || '10000' }}"
+        GLITCH_COUNT="${{ github.event.inputs.glitch_count || '15' }}" # workflow_dispatch からの入力、またはデフォルト値
+        GLITCH_STRENGTH="${{ github.event.inputs.glitch_strength || '10000' }}" # workflow_dispatch からの入力、またはデフォルト値
 
         if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
           INPUT_FILE="${{ github.event.inputs.video_file_path }}"
+        elif [ "${{ github.event_name }}" == "push" ]; then
+          # pushイベントの場合は、変更されたファイルのうち最初の1つを処理対象とする（または全ての変更ファイルをループ処理）
+          # ここでは簡単のため、変更されたファイルのリストを直接使わず、次ステップで個別に処理
+          # `tj-actions/changed-files` が設定されているので、実際にはそのoutputを使います
+          echo "Processing push event. Files will be processed by iterating over changed-videos output."
         fi
 
         echo "input_file=$INPUT_FILE" >> $GITHUB_OUTPUT
@@ -80,9 +85,7 @@ jobs:
           OUTPUT_PATH="${INPUT_DIR}/${OUTPUT_FILENAME}"
 
           # データモッシングスクリプトを実行
-          python datamosh.py "$file" "$OUTPUT_PATH" \
-            "${{ steps.set-inputs.outputs.glitch_count }}" \
-            "${{ steps.set-inputs.outputs.glitch_strength }}"
+          python datamosh.py "$file" "$OUTPUT_PATH" "${{ steps.set-inputs.outputs.glitch_count }}" "${{ steps.set-inputs.outputs.glitch_strength }}"
           
           if [ -f "$OUTPUT_PATH" ]; then
             echo "Successfully created $OUTPUT_PATH"
@@ -124,7 +127,7 @@ jobs:
 
         if [ -f "$OUTPUT_PATH" ]; then
           echo "Successfully created $OUTPUT_PATH"
-          echo "output_path=$OUTPUT_PATH" >> $GITHUB_OUTPUT
+          echo "output_path=$OUTPUT_PATH" >> $GITHUB_OUTPUT # 次のステップで利用するため出力
           echo "output_filename=$OUTPUT_FILENAME" >> $GITHUB_OUTPUT
         else
           echo "Failed to create $OUTPUT_PATH"
@@ -138,16 +141,21 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: datamoshed-videos-${{ github.run_number }}
-        name: Datamoshed Videos ${{ github.run_number }}
+        # tag_name: v${{ github.run_number }}-${{ github.run_id }} # 新しいタグ名
+        # `git tag` は実行済みを想定。push時に自動でタグが作られるようにするか、または手動タグを推奨
+        # あるいは、ここでは既存タグを利用するか、tag_nameを動的に生成する
+        tag_name: datamoshed-videos-${{ github.run_number }} # ユニークなタグを生成
+        name: Datamoshed Videos ${{ github.run_number }} # リリース名
         body: |
           自動生成されたデータモッシュ動画。
           
           **トリガーイベント:** ${{ github.event_name }}
           **処理されたファイル:** ${{ github.event_name == 'workflow_dispatch' && steps.run-manual-datamosh.outputs.output_filename || steps.changed-videos.outputs.changed_files }}
 
-        draft: false
-        prerelease: false
+        draft: false # ドラフトリリースではない
+        prerelease: false # プレリリースではない
         files: |
+          # pushイベントの場合、videos/ディレクトリ内の_datamoshed.mp4ファイルをすべてアップロード
           ${{ github.event_name == 'push' && 'videos/*_datamoshed.mp4' || '' }}
+          # workflow_dispatchの場合、特定の出力ファイルのみをアップロード
           ${{ github.event_name == 'workflow_dispatch' && steps.run-manual-datamosh.outputs.output_path || '' }}
