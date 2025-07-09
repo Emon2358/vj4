@@ -4,13 +4,14 @@ import random
 import sys
 import re
 
-def download_niconico_video(url, output_dir="videos"):
+def download_niconico_video(url, output_dir="videos", cookies_file_path=None):
     """
     yt-dlpを使ってニコニコ動画をダウンロードします。
 
     Args:
         url (str): ニコニコ動画のURL。
         output_dir (str): ダウンロードした動画を保存するディレクトリ。
+        cookies_file_path (str, optional): クッキーファイルのパス。指定された場合、yt-dlpで使用されます。
 
     Returns:
         str: ダウンロードされた動画ファイルのパス、またはエラーの場合はNone。
@@ -18,38 +19,46 @@ def download_niconico_video(url, output_dir="videos"):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
-    
-    print(f"ニコニコ動画をダウンロード中: {url}...")
-    try:
-        # --print filepath: ダウンロード後にファイルの絶対パスを出力
-        # --verbose: 詳細なログを出力 (デバッグ用)
-        # --no-simulate: シミュレーションモードを無効化
-        # --output: 出力ファイル名を指定
-        # --format bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best: MP4形式で最高品質の動画と音声を結合、または最高のMP4形式、または最高の品質を選択
-        # --merge-output-format mp4: 結合された出力の形式をmp4に設定
-        result = subprocess.run([
-            "yt-dlp",
-            "--output", output_template,
-            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "--merge-output-format", "mp4",
-            "--print", "filepath", # ダウンロードされたファイルの絶対パスを出力
-            "--verbose", # デバッグのために詳細ログを追加
-            url
-        ], check=True, capture_output=True, text=True)
-        
-        # yt-dlpのstdoutには、--print filepathで指定されたパスが含まれるはず
-        # 最後の行がfilepathであることが多いが、念のため正規表現で抽出
-        downloaded_file_path_match = re.search(r'^(.*?)\n?$', result.stdout.strip().split('\n')[-1])
-        downloaded_file_path = downloaded_file_path_match.group(1) if downloaded_file_path_match else ""
+    # URLから動画IDを抽出し、ファイル名に使用
+    # sm, nm, so 形式のIDをサポート
+    video_id_match = re.search(r'(sm|nm|so)(\d+)', url)
+    if video_id_match:
+        # 抽出したIDをベースファイル名として使用 (例: sm12345)
+        base_filename = video_id_match.group(0)
+    else:
+        # IDが見つからない場合は、汎用名にする
+        base_filename = "niconico_video"
 
-        # 実際にファイルが存在するか確認
-        if os.path.exists(downloaded_file_path):
-            print(f"ダウンロード完了: {downloaded_file_path}")
-            print(f"DOWNLOADED_PATH:{downloaded_file_path}") # GitHub Actionsでパースするためのマーカー
-            return downloaded_file_path
+    # ダウンロードされるファイルの正確な出力パスを定義
+    # yt-dlpは自動的に正しい拡張子を付与するため、ここでは.mp4を仮定
+    download_target_path = os.path.join(output_dir, f"{base_filename}.mp4")
+
+    print(f"ニコニコ動画をダウンロード中: {url}...")
+    cmd = [
+        "yt-dlp",
+        url,
+        "--output", download_target_path, # 正確な出力パスを指定
+        "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "--verbose", # デバッグのために詳細ログを追加
+    ]
+    if cookies_file_path and os.path.exists(cookies_file_path):
+        cmd.extend(["--cookies", cookies_file_path])
+        print(f"クッキーファイル {cookies_file_path} を使用します。")
+    else:
+        print("クッキーファイルは使用しません。")
+
+    try:
+        # yt-dlpを実行し、ダウンロードターゲットパスにファイルを保存
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        
+        # yt-dlpが実際にファイルをダウンロードしたか、指定したパスにファイルが存在するか確認
+        if os.path.exists(download_target_path):
+            print(f"ダウンロード完了: {download_target_path}")
+            print(f"DOWNLOADED_PATH:{download_target_path}") # GitHub Actionsでパースするためのマーカー
+            return download_target_path
         else:
-            print(f"エラー: yt-dlpは完了しましたが、ファイルが見つかりません: {downloaded_file_path}")
+            print(f"エラー: yt-dlpは完了しましたが、ファイルが見つかりません: {download_target_path}")
             print("yt-dlpの完全な出力:\n", result.stdout)
             print("yt-dlpのエラー出力:\n", result.stderr)
             print("ERROR:File not found after download") # GitHub Actionsでパースするためのマーカー
@@ -160,64 +169,71 @@ if __name__ == "__main__":
     # コマンドライン引数の解析をより堅牢にする
     args = sys.argv[1:]
     
-    input_file = None
-    output_file = None
-    niconico_url = None
+    input_source_arg = None # これは最初の位置引数（ファイルパス、URL、またはID）
+    final_output_path_arg = None # これは2番目の位置引数（希望する出力ファイル）
     glitches = 10
     strength = 8000
+    cookies_file = "cookies.txt" # デフォルトのクッキーファイルパス（スクリプト実行ディレクトリからの相対パス）
 
     i = 0
     while i < len(args):
-        if args[i] == "--url":
-            niconico_url = args[i+1]
-            i += 2
-        elif args[i] == "--glitches":
+        if args[i] == "--glitches":
             glitches = int(args[i+1])
             i += 2
         elif args[i] == "--strength":
             strength = int(args[i+1])
             i += 2
+        elif args[i] == "--cookies-file":
+            cookies_file = args[i+1]
+            i += 2
         else:
-            # 残りの引数をファイルパスとして扱う
-            if input_file is None:
-                input_file = args[i]
-            elif output_file is None:
-                output_file = args[i]
+            # オプションではない最初の引数は入力ソース
+            # オプションではない2番目の引数は出力ファイル
+            if input_source_arg is None:
+                input_source_arg = args[i]
+            elif final_output_path_arg is None:
+                final_output_path_arg = args[i]
             i += 1
 
-    # --url が指定されている場合は、出力ファイルが必須
-    if niconico_url and not output_file:
-        print("エラー: --url オプションを使用する場合は、出力ファイル名を指定する必要があります。")
-        sys.exit(1)
-    # --url もファイルパスも指定されていない場合
-    if not niconico_url and not input_file:
+    if not input_source_arg or not final_output_path_arg:
         print("使用法:")
         print("  ファイルパスからデータモッシュ: python datamosh.py <入力ファイル名> <出力ファイル名> [--glitches <回数>] [--strength <強度>]")
-        print("  ニコニコ動画URLからデータモッシュ: python datamosh.py --url <ニコニコ動画URL> <出力ファイル名> [--glitches <回数>] [--strength <強度>]")
-        sys.exit(1)
-    
-    # ローカルファイルパスが指定されている場合は、出力ファイルが必須
-    if input_file and not output_file:
-        print("エラー: ローカルファイルパスを指定する場合は、出力ファイル名を指定する必要があります。")
+        print("  ニコニコ動画URL/IDからデータモッシュ: python datamosh.py <ニコニコ動画URLまたはID> <出力ファイル名> [--glitches <回数>] [--strength <強度>] [--cookies-file <パス>]")
         sys.exit(1)
 
-    if niconico_url:
-        download_dir = "downloaded_videos"
-        downloaded_path = download_niconico_video(niconico_url, download_dir)
+    # input_source_argがURLかニコニコ動画IDかを判断
+    is_niconico_input = False
+    niconico_url_to_download = None
+    
+    if input_source_arg.startswith("http://") or input_source_arg.startswith("https://"):
+        niconico_url_to_download = input_source_arg
+        if "nicovideo.jp/watch/" in input_source_arg:
+            is_niconico_input = True
+    elif re.match(r'^(sm|nm|so)\d+$', input_source_arg): # ニコニコ動画ID (例: sm9) かどうかを確認
+        niconico_url_to_download = f"https://www.nicovideo.jp/watch/{input_source_arg}"
+        is_niconico_input = True
+
+    if is_niconico_input:
+        download_dir = "downloaded_videos_temp" # ダウンロード用の一時ディレクトリを使用
+        downloaded_path = download_niconico_video(niconico_url_to_download, download_dir, cookies_file_path=cookies_file)
+        
         if downloaded_path:
-            # ダウンロードが成功した場合のみデータモッシュを実行
-            # 出力ファイル名は、ダウンロードされたファイル名に基づいて生成
-            input_filename_no_ext = os.path.splitext(os.path.basename(downloaded_path))[0]
-            final_output_file = os.path.join(download_dir, f"{input_filename_no_ext}_datamoshed.mp4")
+            # ダウンロードされた動画を最終出力パスにデータモッシュ
+            datamosh_video(downloaded_path, final_output_path_arg, glitches_to_apply=glitches, glitch_strength=strength)
             
-            datamosh_video(downloaded_path, final_output_file, glitches_to_apply=glitches, glitch_strength=strength)
-            
-            # ダウンロードした一時ファイルを削除 (データモッシュされたファイルと異なる場合のみ)
-            if os.path.exists(downloaded_path) and downloaded_path != final_output_file:
+            # ダウンロードした一時ファイルをクリーンアップ
+            if os.path.exists(downloaded_path):
                 os.remove(downloaded_path)
                 print(f"一時ダウンロードファイル {downloaded_path} を削除しました。")
+            
+            # 一時ダウンロードディレクトリが空になったら削除
+            if os.path.exists(download_dir) and not os.listdir(download_dir):
+                os.rmdir(download_dir)
+                print(f"空のダウンロードディレクトリ {download_dir} を削除しました。")
+
         else:
             print("動画のダウンロードに失敗しました。データモッシュをスキップします。")
             sys.exit(1)
-    elif input_file:
-        datamosh_video(input_file, output_file, glitches_to_apply=glitches, glitch_strength=strength)
+    else: # ローカルファイルパスと仮定
+        datamosh_video(input_source_arg, final_output_path_arg, glitches_to_apply=glitches, glitch_strength=strength)
+
