@@ -8,9 +8,13 @@ on:
   workflow_dispatch:
     inputs:
       video_file_path:
-        description: '処理する動画ファイルへのパス (例: videos/input.mp4)'
-        required: true
-        default: 'videos/input.mp4'
+        description: '処理するローカル動画ファイルへのパス (例: videos/input.mp4)'
+        required: false # ニコニコ動画URLが指定された場合は不要
+        default: ''
+      niconico_video_url:
+        description: 'データモッシュするニコニコ動画のURL (例: https://www.nicovideo.jp/watch/smXXXXXX)'
+        required: false # ローカルファイルパスが指定された場合は不要
+        default: ''
       glitch_count:
         description: 'グリッチの回数'
         required: false
@@ -37,10 +41,12 @@ jobs:
       with:
         python-version: '3.x'
 
-    - name: Install FFmpeg
+    - name: Install FFmpeg and yt-dlp
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg
+        sudo apt-get install -y python3-pip # pipをインストール
+        pip install yt-dlp # yt-dlpをインストール
 
     - name: Get changed video files (for push event)
       id: changed-videos
@@ -54,23 +60,15 @@ jobs:
     - name: Set input variables for processing
       id: set-inputs
       run: |
-        INPUT_FILE=""
-        GLITCH_COUNT="${{ github.event.inputs.glitch_count || '15' }}" # workflow_dispatch からの入力、またはデフォルト値
-        GLITCH_STRENGTH="${{ github.event.inputs.glitch_strength || '10000' }}" # workflow_dispatch からの入力、またはデフォルト値
-
-        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-          INPUT_FILE="${{ github.event.inputs.video_file_path }}"
-        elif [ "${{ github.event_name }}" == "push" ]; then
-          # pushイベントの場合は、変更されたファイルのうち最初の1つを処理対象とする（または全ての変更ファイルをループ処理）
-          # ここでは簡単のため、変更されたファイルのリストを直接使わず、次ステップで個別に処理
-          # `tj-actions/changed-files` が設定されているので、実際にはそのoutputを使います
-          echo "Processing push event. Files will be processed by iterating over changed-videos output."
-        fi
+        INPUT_FILE="${{ github.event.inputs.video_file_path }}"
+        NICONICO_URL="${{ github.event.inputs.niconico_video_url }}"
+        GLITCH_COUNT="${{ github.event.inputs.glitch_count || '15' }}"
+        GLITCH_STRENGTH="${{ github.event.inputs.glitch_strength || '10000' }}"
 
         echo "input_file=$INPUT_FILE" >> $GITHUB_OUTPUT
+        echo "niconico_url=$NICONICO_URL" >> $GITHUB_OUTPUT
         echo "glitch_count=$GLITCH_COUNT" >> $GITHUB_OUTPUT
         echo "glitch_strength=$GLITCH_STRENGTH" >> $GITHUB_OUTPUT
-
 
     - name: Run datamoshing (Push event)
       if: github.event_name == 'push' && steps.changed-videos.outputs.any_changed == 'true'
@@ -100,38 +98,73 @@ jobs:
       if: github.event_name == 'workflow_dispatch'
       run: |
         INPUT_FILE="${{ steps.set-inputs.outputs.input_file }}"
+        NICONICO_URL="${{ steps.set-inputs.outputs.niconico_url }}"
         GLITCH_COUNT="${{ steps.set-inputs.outputs.glitch_count }}"
         GLITCH_STRENGTH="${{ steps.set-inputs.outputs.glitch_strength }}"
+        
+        PROCESSED_INPUT_FILE="" # 実際にデータモッシュに渡されるファイルパス
 
-        if [[ -z "$INPUT_FILE" ]]; then
-          echo "エラー: 'video_file_path' が指定されていません。"
+        if [[ -n "$NICONICO_URL" ]]; then
+          echo "ニコニコ動画URLを処理中: $NICONICO_URL"
+          # yt-dlpを使ってダウンロード
+          DOWNLOAD_DIR="downloaded_videos"
+          mkdir -p "$DOWNLOAD_DIR"
+          # Pythonスクリプトのdownload_niconico_video関数を直接呼び出す
+          DOWNLOADED_PATH=$(python -c "import datamosh; print(datamosh.download_niconico_video('$NICONICO_URL', '$DOWNLOAD_DIR'))")
+          
+          if [[ -z "$DOWNLOADED_PATH" || ! -f "$DOWNLOADED_PATH" ]]; then
+            echo "エラー: ニコニコ動画のダウンロードに失敗しました。"
+            exit 1
+          fi
+          PROCESSED_INPUT_FILE="$DOWNLOADED_PATH"
+          echo "ダウンロードされたファイル: $PROCESSED_INPUT_FILE"
+          
+          # ダウンロードされたファイルのパスから出力ファイル名を決定
+          INPUT_FILENAME=$(basename "$PROCESSED_INPUT_FILE")
+          FILENAME_NO_EXT="${INPUT_FILENAME%.*}"
+          OUTPUT_FILENAME="${FILENAME_NO_EXT}_datamoshed.mp4"
+          OUTPUT_PATH="${DOWNLOAD_DIR}/${OUTPUT_FILENAME}" # ダウンロードディレクトリに出力
+        elif [[ -n "$INPUT_FILE" ]]; then
+          echo "ローカルファイルパスを処理中: $INPUT_FILE"
+          if [[ ! -f "$INPUT_FILE" ]]; then
+            echo "エラー: 指定されたファイル '$INPUT_FILE' が見つかりません。"
+            exit 1
+          fi
+          PROCESSED_INPUT_FILE="$INPUT_FILE"
+          INPUT_DIR=$(dirname "$INPUT_FILE")
+          INPUT_FILENAME=$(basename "$INPUT_FILE")
+          FILENAME_NO_EXT="${INPUT_FILENAME%.*}"
+          OUTPUT_FILENAME="${FILENAME_NO_EXT}_datamoshed.mp4"
+          OUTPUT_PATH="${INPUT_DIR}/${OUTPUT_FILENAME}"
+        else
+          echo "エラー: 'video_file_path' または 'niconico_video_url' のいずれかを指定してください。"
           exit 1
         fi
-        if [[ ! -f "$INPUT_FILE" ]]; then
-          echo "エラー: 指定されたファイル '$INPUT_FILE' が見つかりません。"
-          exit 1
-        fi
 
-        INPUT_DIR=$(dirname "$INPUT_FILE")
-        INPUT_FILENAME=$(basename "$INPUT_FILE")
-        FILENAME_NO_EXT="${INPUT_FILENAME%.*}"
-        OUTPUT_FILENAME="${FILENAME_NO_EXT}_datamoshed.mp4"
-        OUTPUT_PATH="${INPUT_DIR}/${OUTPUT_FILENAME}"
-
-        echo "Processing $INPUT_FILE..."
+        echo "Processing $PROCESSED_INPUT_FILE..."
         echo "Output will be saved to $OUTPUT_PATH"
         echo "Glitch Count: $GLITCH_COUNT"
         echo "Glitch Strength: $GLITCH_STRENGTH"
 
-        python datamosh.py "$INPUT_FILE" "$OUTPUT_PATH" "$GLITCH_COUNT" "$GLITCH_STRENGTH"
+        python datamosh.py "$PROCESSED_INPUT_FILE" "$OUTPUT_PATH" "$GLITCH_COUNT" "$GLITCH_STRENGTH"
 
         if [ -f "$OUTPUT_PATH" ]; then
           echo "Successfully created $OUTPUT_PATH"
           echo "output_path=$OUTPUT_PATH" >> $GITHUB_OUTPUT # 次のステップで利用するため出力
           echo "output_filename=$OUTPUT_FILENAME" >> $GITHUB_OUTPUT
+          echo "downloaded_file_to_clean=$PROCESSED_INPUT_FILE" >> $GITHUB_OUTPUT # ダウンロードしたファイルをクリーンアップするために出力
         else
           echo "Failed to create $OUTPUT_PATH"
           exit 1
+        fi
+
+    - name: Clean up downloaded file (Manual workflow_dispatch)
+      if: github.event_name == 'workflow_dispatch' && steps.run-manual-datamosh.outputs.downloaded_file_to_clean != ''
+      run: |
+        DOWNLOADED_FILE="${{ steps.run-manual-datamosh.outputs.downloaded_file_to_clean }}"
+        if [ -f "$DOWNLOADED_FILE" ]; then
+          rm "$DOWNLOADED_FILE"
+          echo "ダウンロードされた一時ファイル $DOWNLOADED_FILE を削除しました。"
         fi
 
     - name: Create Release and Upload Asset
@@ -141,16 +174,14 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        # tag_name: v${{ github.run_number }}-${{ github.run_id }} # 新しいタグ名
-        # `git tag` は実行済みを想定。push時に自動でタグが作られるようにするか、または手動タグを推奨
-        # あるいは、ここでは既存タグを利用するか、tag_nameを動的に生成する
         tag_name: datamoshed-videos-${{ github.run_number }} # ユニークなタグを生成
         name: Datamoshed Videos ${{ github.run_number }} # リリース名
         body: |
           自動生成されたデータモッシュ動画。
           
           **トリガーイベント:** ${{ github.event_name }}
-          **処理されたファイル:** ${{ github.event_name == 'workflow_dispatch' && steps.run-manual-datamosh.outputs.output_filename || steps.changed-videos.outputs.changed_files }}
+          **処理されたファイル:** ${{ github.event_name == 'workflow_dispatch' && steps.run-manual-datamosh.outputs.output_filename || '' }}
+          ${{ github.event_name == 'push' && steps.changed-videos.outputs.changed_files || '' }}
 
         draft: false # ドラフトリリースではない
         prerelease: false # プレリリースではない
@@ -159,3 +190,4 @@ jobs:
           ${{ github.event_name == 'push' && 'videos/*_datamoshed.mp4' || '' }}
           # workflow_dispatchの場合、特定の出力ファイルのみをアップロード
           ${{ github.event_name == 'workflow_dispatch' && steps.run-manual-datamosh.outputs.output_path || '' }}
+
