@@ -1,0 +1,98 @@
+name: Datamosh Video on Push
+
+on:
+  push:
+    paths:
+      - 'videos/*.mp4'
+      - 'videos/*.mov'
+  workflow_dispatch: # これを追加します！
+    inputs:
+      video_file_path:
+        description: '処理する動画ファイルへのパス (例: videos/input.mp4)'
+        required: true
+        default: 'videos/input.mp4' # デフォルト値を設定
+      glitch_count:
+        description: 'グリッチの回数'
+        required: false
+        default: '15'
+      glitch_strength:
+        description: 'グリッチの強度 (バイト数)'
+        required: false
+        default: '10000'
+
+jobs:
+  datamosh:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install FFmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Run datamoshing for specified video
+      run: |
+        INPUT_FILE="${{ github.event.inputs.video_file_path }}"
+        GLITCH_COUNT="${{ github.event.inputs.glitch_count }}"
+        GLITCH_STRENGTH="${{ github.event.inputs.glitch_strength }}"
+
+        if [[ -z "$INPUT_FILE" ]]; then
+          echo "エラー: 'video_file_path' が指定されていません。"
+          exit 1
+        fi
+        if [[ ! -f "$INPUT_FILE" ]]; then
+          echo "エラー: 指定されたファイル '$INPUT_FILE' が見つかりません。"
+          exit 1
+        fi
+
+        INPUT_DIR=$(dirname "$INPUT_FILE")
+        INPUT_FILENAME=$(basename "$INPUT_FILE")
+        FILENAME_NO_EXT="${INPUT_FILENAME%.*}"
+        OUTPUT_FILENAME="${FILENAME_NO_EXT}_datamoshed.mp4"
+        OUTPUT_PATH="${INPUT_DIR}/${OUTPUT_FILENAME}"
+
+        echo "Processing $INPUT_FILE..."
+        echo "Output will be saved to $OUTPUT_PATH"
+        echo "Glitch Count: $GLITCH_COUNT"
+        echo "Glitch Strength: $GLITCH_STRENGTH"
+
+        python datamosh.py "$INPUT_FILE" "$OUTPUT_PATH" "$GLITCH_COUNT" "$GLITCH_STRENGTH"
+
+        if [ -f "$OUTPUT_PATH" ]; then
+          echo "Successfully created $OUTPUT_PATH"
+        else
+          echo "Failed to create $OUTPUT_PATH"
+          exit 1
+        fi
+
+    - name: Commit datamoshed video
+      # 手動実行の場合は、変更があった場合のみコミット
+      if: success() && github.event_name == 'workflow_dispatch'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        # inputsから受け取ったパスを使って、特定の出力ファイルのみをコミット
+        INPUT_FILE="${{ github.event.inputs.video_file_path }}"
+        INPUT_DIR=$(dirname "$INPUT_FILE")
+        INPUT_FILENAME=$(basename "$INPUT_FILE")
+        FILENAME_NO_EXT="${INPUT_FILENAME%.*}"
+        OUTPUT_FILENAME="${FILENAME_NO_EXT}_datamoshed.mp4"
+        OUTPUT_PATH="${INPUT_DIR}/${OUTPUT_FILENAME}"
+
+        git add "$OUTPUT_PATH"
+        git commit -m "Add manually datamoshed video: $OUTPUT_FILENAME" || echo "No changes to commit"
+
+    - name: Push datamoshed video
+      if: success() && github.event_name == 'workflow_dispatch'
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: ${{ github.ref_name }}
