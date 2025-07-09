@@ -11,14 +11,14 @@ on:
         description: '処理する動画ファイルへのパス (例: videos/input.mp4)'
         required: true
         default: 'videos/input.mp4'
-      total_glitch_percentage: # 新しい入力パラメータ
-        description: '動画データ全体に対して破壊するバイトの割合 (0.0 - 1.0)'
+      glitch_count: # 以前のパラメータに戻す
+        description: '適用するグリッチの回数'
         required: false
-        default: '0.1' # デフォルトは10%
-      num_glitch_blocks: # 新しい入力パラメータ
-        description: '破壊を行うブロックの数 (多いほど破壊が細かくなる)'
+        default: '15' # デフォルト値を設定
+      glitch_strength: # 以前のパラメータに戻す
+        description: '各グリッチで破損させるバイト数'
         required: false
-        default: '100' # デフォルトは100ブロック
+        default: '10000' # デフォルト値を設定
 
 permissions:
   contents: write
@@ -54,16 +54,17 @@ jobs:
       id: set-inputs
       run: |
         INPUT_FILE=""
-        TOTAL_GLITCH_PERCENTAGE="${{ github.event.inputs.total_glitch_percentage || '0.1' }}"
-        NUM_GLITCH_BLOCKS="${{ github.event.inputs.num_glitch_blocks || '100' }}"
+        # workflow_dispatch からの入力、またはデフォルト値
+        GLITCH_COUNT="${{ github.event.inputs.glitch_count || '15' }}"
+        GLITCH_STRENGTH="${{ github.event.inputs.glitch_strength || '10000' }}"
 
         if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
           INPUT_FILE="${{ github.event.inputs.video_file_path }}"
         fi
 
         echo "input_file=$INPUT_FILE" >> $GITHUB_OUTPUT
-        echo "total_glitch_percentage=$TOTAL_GLITCH_PERCENTAGE" >> $GITHUB_OUTPUT
-        echo "num_glitch_blocks=$NUM_GLITCH_BLOCKS" >> $GITHUB_OUTPUT
+        echo "glitch_count=$GLITCH_COUNT" >> $GITHUB_OUTPUT
+        echo "glitch_strength=$GLITCH_STRENGTH" >> $GITHUB_OUTPUT
 
 
     - name: Run datamoshing (Push event)
@@ -80,8 +81,8 @@ jobs:
 
           # データモッシングスクリプトを実行
           python datamosh.py "$file" "$OUTPUT_PATH" \
-            "${{ steps.set-inputs.outputs.total_glitch_percentage }}" \
-            "${{ steps.set-inputs.outputs.num_glitch_blocks }}"
+            "${{ steps.set-inputs.outputs.glitch_count }}" \
+            "${{ steps.set-inputs.outputs.glitch_strength }}"
           
           if [ -f "$OUTPUT_PATH" ]; then
             echo "Successfully created $OUTPUT_PATH"
@@ -96,8 +97,8 @@ jobs:
       if: github.event_name == 'workflow_dispatch'
       run: |
         INPUT_FILE="${{ steps.set-inputs.outputs.input_file }}"
-        TOTAL_GLITCH_PERCENTAGE="${{ steps.set-inputs.outputs.total_glitch_percentage }}"
-        NUM_GLITCH_BLOCKS="${{ steps.set-inputs.outputs.num_glitch_blocks }}"
+        GLITCH_COUNT="${{ steps.set-inputs.outputs.glitch_count }}"
+        GLITCH_STRENGTH="${{ steps.set-inputs.outputs.glitch_strength }}"
 
         if [[ -z "$INPUT_FILE" ]]; then
           echo "エラー: 'video_file_path' が指定されていません。"
@@ -116,10 +117,10 @@ jobs:
 
         echo "Processing $INPUT_FILE..."
         echo "Output will be saved to $OUTPUT_PATH"
-        echo "Total Glitch Percentage: $TOTAL_GLITCH_PERCENTAGE"
-        echo "Number of Glitch Blocks: $NUM_GLITCH_BLOCKS"
+        echo "Glitch Count: $GLITCH_COUNT"
+        echo "Glitch Strength: $GLITCH_STRENGTH"
 
-        python datamosh.py "$INPUT_FILE" "$OUTPUT_PATH" "$TOTAL_GLITCH_PERCENTAGE" "$NUM_GLITCH_BLOCKS"
+        python datamosh.py "$INPUT_FILE" "$OUTPUT_PATH" "$GLITCH_COUNT" "$GLITCH_STRENGTH"
 
         if [ -f "$OUTPUT_PATH" ]; then
           echo "Successfully created $OUTPUT_PATH"
